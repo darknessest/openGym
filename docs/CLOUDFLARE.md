@@ -24,25 +24,39 @@ Training happens in openGym; an assistant on your computer uses MCP when you ask
 No ChatGPT or Claude credentials are uploaded to openGym. Your local assistant handles model
 access through its own account. openGym only serves tools and stores the changes you request.
 
-For **Codex CLI**, put the token in the local environment as `OPENGYM_TOKEN` without adding it
-to shell history, then run:
+### Claude Code
+
+Put the token in your local environment as `OPENGYM_TOKEN` without adding its value to shell
+history, then run:
 
 ```sh
-codex mcp add opengym --url https://opengym.example.com/mcp --bearer-token-env-var OPENGYM_TOKEN
+claude mcp add --scope user --transport http opengym https://opengym.example.com/mcp \
+  --header "Authorization: Bearer $OPENGYM_TOKEN"
 ```
 
-Its equivalent configuration in `~/.codex/config.toml` is:
+The user scope keeps the credential in your personal Claude configuration rather than a
+project's checked-in MCP configuration. Open Claude Code and use `/mcp` to check the connection.
+The command uses a fixed bearer token; no browser OAuth callback is needed.
+See [Claude Code's MCP guide](https://code.claude.com/docs/en/mcp).
 
-```toml
-[mcp_servers.opengym]
-url = "https://opengym.example.com/mcp"
-bearer_token_env_var = "OPENGYM_TOKEN"
-```
+### Claude Desktop
 
-Start Codex with that environment variable available. A client that accepts JSON MCP
-configuration can use the example shown on the MCP page; each client's config format differs.
-The existing local stdio bridge can also run on your computer with `OPENGYM_URL` and
-`OPENGYM_TOKEN`; see [mcp/README.md](../mcp/README.md).
+1. Open **Customize → Connectors → Add → Custom → Web**. Depending on the app version, the
+   button may instead say **Add custom connector**.
+2. Name it **openGym** and enter `https://opengym.example.com/mcp`.
+3. Choose **No sign in** for authentication, since this server uses a fixed token rather than
+   OAuth. Under **Request headers**, add `Authorization` with the value `Bearer YOUR_TOKEN`.
+4. Add the connector and enable it for the conversation where you want to use your training.
+
+Claude Desktop's remote connector sends requests from Anthropic's cloud. The endpoint is
+public HTTPS, while the token restricts access to your selected profile/categories. These
+[connector and request-header settings](https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities)
+are documented by Anthropic. They do not require a ChatGPT/Claude credential inside openGym.
+
+For a connection launched locally by Desktop, the existing stdio bridge can run on your
+computer with `OPENGYM_URL=https://opengym.example.com`, `OPENGYM_SOURCE=api`, and
+`OPENGYM_TOKEN`; see [mcp/README.md](../mcp/README.md). It uses the same scoped API and has
+no need for a local data folder.
 
 Try asking: “Review my recent training and suggest a three-day plan.” The tools support
 exercise search, routines, weekly plans, workouts, body weight, strength estimates and muscle
