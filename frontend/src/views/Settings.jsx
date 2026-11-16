@@ -1348,7 +1348,7 @@ export default function Settings({ page = null, find = null, via = null, entryKe
           which build you are running, or whether an update actually installed. */}
       <div className="dim small sp-version">
         openGym v{__APP_VERSION__} · {t('free & open source (AGPL v3)')}<br />
-        <a href="https://github.com/DuarteSantos8/openGym" target="_blank" rel="noopener"><span>{t('Source code')}</span></a><br />
+        <a href={REPO} target="_blank" rel="noopener"><span>{t('Source code')}</span></a><br />
         {/* Attribution the media licence asks for word for word (agreement §8c), so it is not translated.
             The spans keep each link's words above its neighbours' 44 px tap targets (index.css). */}
         Exercise media © Aliaksandr Makatserchyk, <a href="https://gymvisual.com/" target="_blank" rel="noopener"><span>Gym visual</span></a>, gymvisual.com.
@@ -1502,6 +1502,8 @@ function SettingsRoot({ ctx, preview, open, user, sync, home, go, entryKey }) {
           {ctx.mod('motivation') && <PinnedBadges />}
           <Icon name="chevronRight" className="lrow-c" />
         </button>
+        {!DEMO && user?.admin && <Row icon="crown" iconTint="var(--indigo)" title={t('Admin dashboard')}
+          accessory="chevron" onClick={() => nav('/admin')} />}
       </Section>
       {ROOT_GROUPS.map(g => ({ ...g, ids: g.ids.filter(id => onRoot(id, ctx)) })).filter(g => g.ids.length).map(g => (
         <Section key={g.ids[0]} title={g.title && t(g.title)}>
@@ -1514,8 +1516,8 @@ function SettingsRoot({ ctx, preview, open, user, sync, home, go, entryKey }) {
             value={t('Admin')} accessory="chevron" onClick={() => nav('/admin', { state: { section: 'coach' } })} className="sp-root-row" />}
           {/* Claude, ChatGPT or Gemini on the plan people already pay for, with openGym as their
               connector (views/Assistants.jsx). Everywhere but the offline build and the demo. */}
-          {g.title === 'Connections' && !DEMO && !ctx.offline && <Row icon="chat" iconTint="var(--acc)" title={t('Use your subscription')}
-            accessory="chevron" onClick={() => nav('/assistants')} className="sp-root-row" />}
+          {g.title === 'Connections' && !DEMO && !ctx.offline && <Row icon="chat" iconTint="var(--acc)" title={config?.mcp_auth === 'token' ? 'MCP' : t('Use your subscription')}
+            accessory="chevron" onClick={() => nav(config?.mcp_auth === 'token' ? '/settings/api-tokens' : '/assistants')} className="sp-root-row" />}
         </Section>
       ))}
       <div className="dim small sp-version">openGym v{__APP_VERSION__}</div>

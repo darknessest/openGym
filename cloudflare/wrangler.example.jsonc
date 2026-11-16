@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "opengym-personal",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{"pattern": "opengym.example.com", "custom_domain": true}],
+  "assets": {
+    "directory": "../frontend/dist", "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/mcp", "/mcp/*", "/.well-known/*"]
+  },
+  "durable_objects": {"bindings": [
+    {"name": "GYM", "class_name": "Gym"},
+    {"name": "PUSH_TIMERS", "class_name": "PushTimers"}
+  ]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["Gym", "PushTimers"]}],
+  "r2_buckets": [{"binding": "MEDIA", "bucket_name": "opengym-personal-media"}],
+  "ratelimits": [
+    {"name": "API_RATE_LIMITER", "namespace_id": "700501", "simple": {"limit": 300, "period": 60}},
+    {"name": "AUTH_RATE_LIMITER", "namespace_id": "700502", "simple": {"limit": 30, "period": 60}}
+  ],
+  "vars": {
+    "ORIGIN": "https://opengym.example.com", "RP_ID": "opengym.example.com",
+    "INVITE_ONLY": "true", "PASSWORD_LOGIN": "true"
+  },
+  "observability": {"enabled": true}
+}

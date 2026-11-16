@@ -52,7 +52,15 @@ frontend/pdf-samples/
 # SwiftPM build output of the WatchCore package
 frontend/ios/App/WatchCore/.build/
 
-# Cloudflare fallback build (cloudflare/build.sh)
+# Cloudflare local credentials and build output
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.owner-invite
+.production-secrets.json
 /dist/
 .wrangler/
 .taste-skill/
+
+# Deployment hostnames and account configuration stay local.
+/cloudflare/wrangler.jsonc

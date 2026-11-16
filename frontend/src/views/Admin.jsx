@@ -422,6 +422,7 @@ export default function Admin() {
     return () => clearTimeout(tm)
   }, [toCoach])
   const user = useStore(s => s.user)
+  const config = useStore(s => s.config)
   const openSheet = useUI(s => s.openSheet)
   const [users, setUsers] = useState(null)
   const [usersErr, setUsersErr] = useState(null)   // why the last load failed, until one succeeds
@@ -464,9 +465,9 @@ export default function Admin() {
       <button className="iconbtn" onClick={() => { loadUsers(); loadInvites(); setTick(n => n + 1) }} aria-label="refresh"><Icon name="reset" /></button>
     </div>
     <div className="adm-intro">
-      Everything about running this instance: who uses it, how they get in, the AI Coach, and what has happened on it. {dataView
+      Everything about running this instance: who uses it, how they get in{config?.coach_supported !== false && ', the AI Coach'}, and what has happened on it. {dataView
         ? 'ADMIN_DATA_VIEW is on, so you can open people’s workouts and weigh-ins. Every look lands in the activity log and in their own sharing log, so be the admin you would want.'
-        : 'You run this server. Training data belongs to the people who logged it, so here you see counts, not workouts. It is readable on disk, not in the app.'}
+        : 'You run this server. Each profile keeps its own training; this dashboard shows account and sync activity.'}
     </div>
 
     {usersErr && <div className="card" role="alert" style={{ borderColor: 'var(--red)' }}>
@@ -496,7 +497,7 @@ export default function Admin() {
 
     {/* The Coach setup. Renders nothing at all unless the instance offers the Coach, so an admin
         page on a box that never enabled it is byte-for-byte the page it was before. */}
-    <div ref={coachRef} className="adm-coach-anchor"><AdminCoach /></div>
+    {config && config.coach_supported !== false && <div ref={coachRef} className="adm-coach-anchor"><AdminCoach /></div>}
 
     <InvitesCard invites={invites} reload={loadInvites} inviteOnly={inviteOnly} />
 

@@ -29,6 +29,21 @@
 
 </div>
 
+## Cloudflare Workers ready
+
+This is a **serverless Cloudflare Workers fork** of
+[DuarteSantos8/openGym](https://github.com/DuarteSantos8/openGym).
+
+- **Workers + Static Assets** serve the API and web app on one domain.
+- **SQLite-backed Durable Objects + R2** persist accounts, workout sync and private uploads.
+- **Authenticated MCP** lets a local assistant review training and edit routines using revocable,
+  profile-scoped tokens. The Cloudflare app runs without an embedded AI Coach or model credentials.
+- **Phone support** keeps passkeys/passwords in the browser and pairing/bearer authentication
+  in the native app, with API throttling before database access.
+
+Start with the [Cloudflare deployment and local MCP guide](docs/CLOUDFLARE.md).
+The upstream Docker deployment remains available below.
+
 ## Why openGym
 
 Most workout apps keep your data on their servers, push you towards a subscription, or vanish
@@ -143,6 +158,9 @@ if you want to try it before installing anything.
 The full list of what changed release by release is in the [changelog](CHANGELOG.md).
 
 ## Quick start
+
+For serverless deployment, see
+[Cloudflare setup and MCP connections](docs/CLOUDFLARE.md).
 
 You need [Docker](https://docs.docker.com/get-docker/) with Compose.
 
