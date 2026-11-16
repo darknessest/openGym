@@ -11,6 +11,7 @@ import { confirmSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
 import { Button } from '../components/ui.jsx'
 import AdminCoach from './AdminCoach.jsx'
+import { chatgptHandoff } from '../lib/chatgpt-handoff.js'
 import AdminCommunity from './AdminCommunity.jsx'
 import AdminOidc from '../components/AdminOidc.jsx'
 import '../admin.css'
@@ -414,7 +415,7 @@ export default function Admin() {
   const nav = useNavigate()
   // Opened from Settings → AI Coach (the hosted app's way to the Coach, which is the server's):
   // straight to the Coach card rather than the top of the page.
-  const toCoach = useLocation().state?.section === 'coach'
+  const toCoach = useLocation().state?.section === 'coach' || !!chatgptHandoff.relay || !!chatgptHandoff.callback
   const coachRef = useRef(null)
   useEffect(() => {
     if (!toCoach) return

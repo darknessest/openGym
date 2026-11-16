@@ -7,6 +7,7 @@ import {
   removePasskeyRecord, passkeyRemovalRefused,
 } from '../api/passkeys-store.js';
 import { json, readJson, HttpError } from './http.js';
+import { cleanupCoachUser } from './coach.js';
 
 const SESSION_MS = 90 * 86400000;
 const COOKIE = '__Host-gymsid';
@@ -330,6 +331,7 @@ export class Accounts {
   }
 
   revoke(user) {
+    cleanupCoachUser(this.store, user.id, { owner: true });
     user.sv++;
     for (const prefix of ['session:', 'link:', 'pair:']) {
       for (const { key, value } of this.store.list(prefix)) if (value.uid === user.id) this.store.delete(key);
@@ -339,6 +341,7 @@ export class Accounts {
 
   remove(user) {
     this.revoke(user);
+    cleanupCoachUser(this.store, user.id, { remove: true, owner: true });
     const remaining = this.store.get('users', []).filter(u => u.id !== user.id);
     this.store.put('users', remaining);
     if (!remaining.length) this.store.delete('owner:claimed');
@@ -461,7 +464,10 @@ export class Accounts {
       return this.store.transaction(() => {
         const user = route.endsWith('/all') ? this.require(auth) : this.session(auth);
         if (user && route.endsWith('/all')) { this.revoke(user); this.saveUser(user); }
-        else if (auth.key) this.store.delete(auth.key);
+        else if (auth.key) {
+          this.store.delete(auth.key);
+          if (user) cleanupCoachUser(this.store, user.id, { sessionKey: auth.key });
+        }
         if (user) this.audit(route.endsWith('/all') ? 'auth.logout.all' : 'auth.logout', user);
         return json({ ok: true }, 200, { 'Set-Cookie': CLEAR_COOKIE });
       });
@@ -879,6 +885,7 @@ export class Accounts {
       if (route === 'POST /api/admin/owner') {
         if (user.id === admin.id) fail(400, 'you already are the owner');
         if (!user.admin || user.disabled) fail(400, 'make them an admin first');
+        cleanupCoachUser(this.store, admin.id, { owner: true });
         for (const u of users) u.owner = u.id === user.id;
         this.store.put('users', users);
         this.audit('admin.owner.transfer', admin, user);

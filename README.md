@@ -37,7 +37,8 @@ This is a **serverless Cloudflare Workers fork** of
 - **Workers + Static Assets** serve the API and web app on one domain.
 - **SQLite-backed Durable Objects + R2** persist accounts, workout sync and private uploads.
 - **Authenticated MCP** lets a local assistant review training and edit routines using revocable,
-  profile-scoped tokens. The Cloudflare app runs without an embedded AI Coach or model credentials.
+  profile-scoped tokens. An optional embedded Coach is also available, using a provider API key
+  or the owner's ChatGPT plan through a local sign-in helper.
 - **Phone support** keeps passkeys/passwords in the browser and pairing/bearer authentication
   in the native app, with API throttling before database access.
 

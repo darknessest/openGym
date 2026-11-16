@@ -5,8 +5,50 @@ The examples use `https://opengym.example.com`; substitute your own hostname.
 openGym runs using Workers Static Assets, a SQLite-backed
 Durable Object for accounts and profile documents, R2 for private uploads, and durable alarms
 for media cleanup and rest notifications. There is no continuously running server or model
-runtime. The embedded AI Coach and its scheduled reviews have been removed from this deployment.
-Training happens in openGym; an assistant on your computer uses MCP when you ask it to.
+runtime. MCP connects an assistant on your computer; the optional embedded AI Coach can also
+run through HTTPS providers or the owner's ChatGPT plan. Both use the same training profile.
+
+## Set up the embedded Coach
+
+Open **Settings → Admin dashboard → AI Coach**, then enable the Coach. Choose an Anthropic
+API key or another HTTPS provider, or select **ChatGPT plan** for the instance owner's plan.
+Each profile chooses whether to consent to Coach use. Proposals are reviewed/applied in the app;
+the server does not silently rewrite training plans. Per-profile and instance daily limits apply.
+Changing provider or endpoint host pauses automatic reviews for every profile. Re-enable them
+in Coach's **Automatic reviews** settings after approving the new destination.
+
+### ChatGPT sign-in from your computer
+
+OpenAI requires a callback on the computer running your browser, at
+`http://127.0.0.1:PORT/auth/callback`. The website's public domain is not an allowed replacement.
+openGym's helper starts that listener before authorization and returns your browser to the
+hosted app automatically. There is no callback URL to copy manually.
+
+1. On your computer, install Node 22 or newer and download **ChatGPT login helper** from the
+   Coach setup card. The helper is also in this repository at `frontend/public/chatgpt-login.mjs`.
+2. Run it on that computer, not on your Cloudflare server:
+
+   ```sh
+   node frontend/public/chatgpt-login.mjs https://opengym.example.com
+   ```
+
+   For the downloaded file, use its local path instead of `frontend/public/chatgpt-login.mjs`.
+3. The helper opens openGym in your browser, or prints the address to open. Sign in as the
+   instance owner, open Coach setup, and choose **Continue with ChatGPT**.
+4. Approve ChatGPT plan use. OpenAI returns to the helper, which sends the browser back to
+   openGym to complete the connection. The helper then stops.
+
+The helper listens only on `127.0.0.1`, chooses an available port, validates a one-use relay
+nonce, and expires after 15 minutes. It exchanges no tokens and writes no credentials. PKCE,
+OIDC identity/nonce checks and credential encryption happen on the server. Callback data travels
+back in a URL fragment, is removed before login/router boot, and is submitted through the
+owner's authenticated session. A missing/expired/replaced session requires a fresh attempt.
+The exact callback URI is retained for authorization and code exchange, as required by
+[OpenAI's sign-in protocol](https://developers.openai.com/siwc/token-sharing-open-source/sign-in).
+
+The owner previously confirmed eligibility for this hosted ChatGPT integration. Live sign-in
+still requires that owner's ChatGPT account and approval. Claude is available via an Anthropic
+API key; a Claude subscription is used through MCP in Claude rather than imported into Coach.
 
 ## Connect your local assistant
 
@@ -21,8 +63,8 @@ Training happens in openGym; an assistant on your computer uses MCP when you ask
    - Transport: Streamable HTTP
    - Header: `Authorization: Bearer YOUR_TOKEN`
 
-No ChatGPT or Claude credentials are uploaded to openGym. Your local assistant handles model
-access through its own account. openGym only serves tools and stores the changes you request.
+MCP itself does not need ChatGPT or Claude credentials in openGym. Your local assistant handles
+its model access through its own account; its openGym token is separate from Coach credentials.
 
 ### Claude Code
 
@@ -179,7 +221,47 @@ reader ignored MCP's smaller body limit. The reader now accepts a per-call limit
 the ordinary API's 5 MiB default. The fix was verified through HTTP, without another review
 round. No other actionable findings were reported.
 
-Production checks passed on 2026-11-16: MCP health and Bearer authentication challenge,
-token-auth configuration, removed Coach endpoints, native preflight, and the published frontend
-matching the verified build. The prior Coach configuration/credential/job documents were
-removed from server storage. Production training documents were not used for verification.
+The preceding MCP-only deployment passed production checks on 2026-11-16: MCP health and
+Bearer authentication challenge, token-auth configuration, native preflight, and frontend
+build integrity. Its old Coach documents were removed; restoring Coach now starts disconnected
+and requires a fresh provider connection. Production training documents were not used for tests.
+
+The restoration was verified with the real Node helper, browser, Workers/SQLite runtime, and
+controlled responses at the OpenAI network boundary. The browser completed the helper's
+127.0.0.1 callback, returned to hosted Admin, removed callback data from its address, and showed
+ChatGPT connected. The fixture checked PKCE, exact redirect URI, ID-token signature/nonce,
+and plan-use permission. Opening the helper link in an existing app tab also completed sign-in.
+Invalid helper requests were rejected without closing the listener;
+a successful handoff closed it. Further HTTP checks passed one-use callbacks, exact-session
+and port binding, returning-account identity checks, preserved credentials after a rejected
+account switch, durable Coach test execution, MCP scope limits, and logout revocation. Wrong
+state/port callbacks leave the valid attempt usable; concurrent valid completions exchange
+only once. The ordinary frontend build includes the exact helper as a public asset.
+Two-session HTTP checks also confirmed that logging out another session preserves active
+Coach tests/training jobs, while logging out the initiating session cancels its own jobs.
+
+These checks made no live model requests. Live ChatGPT approval and inference still require
+the owner's account.
+
+Restoration review uses Sol 6.1 with extra-high reasoning:
+
+- Round 1 found that unrelated callbacks could consume a pending attempt and ordinary web
+  builds omitted the helper. Callback validation now precedes the synchronous claim, and the
+  helper lives in Vite's shared public assets. HTTP race/rejection checks and build artifact
+  equality passed after those fixes.
+- Round 2 found that a single-session logout cleared another session's Coach status. Cleanup
+  now clears only status for jobs cancelled by that logout; completed profile proposals remain
+  until resolved or globally revoked. Two-session job execution/cancellation checks passed.
+- Round 3 found that a provider/destination change retained scheduled-review permission.
+  Configuration changes now pause existing cadences through the normal atomic sync commit,
+  with a new revision and edit stamp. HTTP checks confirmed provider/host changes pause reviews,
+  stale writes receive conflicts, workout sync sends nothing while paused, model-only edits
+  retain schedules, and explicitly re-enabling a schedule resumes provider execution.
+
+All three review rounds are complete. The final privacy fix passed those integration checks;
+it did not receive another independent review. No new committed tests were added.
+
+The restored deployment passed production checks on 2026-11-16: Coach capability and
+authentication admission, MCP health/Bearer challenge, native-app preflight including optional
+Access headers, and exact helper/frontend artifact bytes. Existing profile documents and MCP
+tokens were preserved. Real provider authorization remains an owner action.

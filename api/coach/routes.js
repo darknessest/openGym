@@ -401,21 +401,24 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
       json(res, 200, { ok: true });
     },
 
-    /* Sign in with ChatGPT for plan usage (chatgpt-plan.js, preview, COACH_CHATGPT_PLAN=on). Start
-       hands back the address to open in the admin's own browser; that browser ends on a loopback
-       page that does not load, and Finish takes the address it shows. The verifier never leaves
-       this server. 404 without the switch, like a route that is not there. */
+    /* The local callback helper returns to the hosted app, which posts the callback to Finish.
+       The verifier never leaves the server. 404 without the feature switch. */
     'POST /api/admin/coach/chatgpt/start': async (req, res) => {
       if (!requireAdmin(req, res)) return;
       if (!chatgptPlan.on() || !cfgStore.PROVIDERS[CHATGPT]) return json(res, 404, { error: 'not found' });
+      const body = await readBody(req);
       const cfg = cfgStore.load();
       let hostId = cfg.chatgptHost;
       if (!hostId) { hostId = chatgptPlan.newHostId(); cfgStore.save({ chatgptHost: hostId }); }
       const rec = cfgStore.authFor(cfg, CHATGPT);
       const prev = rec && rec.data ? cfgStore.decrypt(rec.data) : null;
-      const s = chatgptPlan.startSignIn({ hostId, clientId: cfg.chatgptClient || prev?.clientId || null, idTokenHint: prev?.idToken || null });
-      chatgptPending = s.pending;
-      json(res, 200, { url: s.url, redirect: chatgptPlan.REDIRECT_URI });
+      let s;
+      try {
+        s = chatgptPlan.startSignIn({ hostId, clientId: cfg.chatgptClient || prev?.clientId || null,
+          idTokenHint: prev?.idToken || null, redirectUri: body.redirectUri, relayNonce: body.relayNonce });
+      } catch (error) { return json(res, 400, { error: error.message }); }
+      chatgptPending = { ...s.pending, accountSub: prev?.sub || null };
+      json(res, 200, { url: s.url, redirect: s.pending.redirectUri });
     },
     'POST /api/admin/coach/chatgpt/finish': async (req, res) => {
       if (!requireAdmin(req, res)) return;
@@ -431,6 +434,10 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
       try { jwks = await (await fetch(chatgptPlan.JWKS_URL)).json(); } catch { /* checked below */ }
       const idt = chatgptPlan.verifyIdToken(ex.tokens.id_token, jwks, { audience: cb.clientId, nonce: pending.nonce });
       if (!idt.ok) return json(res, 502, { error: idt.error });
+      if (pending.accountSub && idt.claims.sub !== pending.accountSub) {
+        await chatgptPlan.revokeCredential(fetch, chatgptPlan.credentialOf(ex.tokens, { clientId: cb.clientId, hostId: pending.hostId }));
+        return json(res, 400, { error: 'Sign in with the connected ChatGPT account, or disconnect it before choosing another account.' });
+      }
       if (!chatgptPlan.planGranted(ex.tokens.scope)) return json(res, 400, { error: 'signed in, but ChatGPT plan use was not allowed; sign in again and allow it' });
       cfgStore.save({ chatgptClient: cb.clientId });
       cfgStore.saveAuth(CHATGPT, {

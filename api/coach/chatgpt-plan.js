@@ -10,11 +10,11 @@
  * meant for a self-hoster's own instance, where it is "an open-source app on a self-hosted VM"
  * (siwc/token-sharing-open-source/self-hosted-vms).
  *
- * The callback is a loopback address on the computer running the browser, never the server. So
- * the admin signs in in their own browser, lands on a page that does not load
- * (http://127.0.0.1:1455/auth/callback?code=…), and pastes that address back into openGym, which
- * finishes the exchange on the server. OpenAI's own self-hosted guide does the same thing by
- * copying the credential file over; this keeps the PKCE verifier on the server.
+ * A local helper listens on 127.0.0.1 before authorization starts. It forwards the callback to
+ * the hosted app in a URL fragment; the app immediately removes it and finishes through its
+ * authenticated API. The PKCE verifier and tokens stay on the server. The helper's random
+ * relay nonce prefixes a separate server-generated OAuth state so unrelated local requests
+ * cannot consume its listener.
  *
  * Pure functions plus an injected fetch; the admin routes and the adapter use them. */
 import crypto from 'node:crypto';
@@ -25,7 +25,6 @@ export const TOKEN_URL = 'https://auth.openai.com/api/accounts/oauth/token';
 export const JWKS_URL = 'https://auth.openai.com/.well-known/jwks.json';
 export const OIDC_CONFIG_URL = 'https://auth.openai.com/.well-known/openid-configuration';
 export const RESOURCE = 'https://api.openai.com/v1';
-export const REDIRECT_URI = 'http://127.0.0.1:1455/auth/callback';
 export const SCOPE = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct';
 export const PLAN_SCOPE = 'chatgpt.tokens.use.direct';
 export const AGENT_NAME = 'openGym';
@@ -44,9 +43,24 @@ export const newHostId = () => 'urn:uuid:' + crypto.randomUUID();
  * The browser address for a sign-in, and what has to be kept to finish it. A saved `clientId`
  * (an earlier registration of this instance) reauthorizes instead of registering again.
  */
-export function startSignIn({ hostId, clientId = null, idTokenHint = null } = {}) {
+export function loopbackRedirectUri(raw) {
+  let url;
+  try { url = new URL(raw); } catch { throw new Error('Start the local ChatGPT login helper first.'); }
+  if (typeof raw !== 'string' || url.protocol !== 'http:' || url.hostname !== '127.0.0.1' ||
+      !url.port || Number(url.port) < 1 || Number(url.port) > 65535 ||
+      url.pathname !== '/auth/callback' || url.username || url.password || url.search || url.hash) {
+    throw new Error('The login callback must be the local helper at http://127.0.0.1:PORT/auth/callback.');
+  }
+  return url.href;
+}
+
+export function startSignIn({ hostId, clientId = null, idTokenHint = null, redirectUri, relayNonce } = {}) {
   if (!hostId) throw new Error('a host id is needed');
-  const state = b64(crypto.randomBytes(24));
+  redirectUri = loopbackRedirectUri(redirectUri);
+  if (typeof relayNonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(relayNonce)) {
+    throw new Error('Start the local ChatGPT login helper first.');
+  }
+  const state = relayNonce + '.' + b64(crypto.randomBytes(24));
   const nonce = b64(crypto.randomBytes(24));
   const verifier = b64(crypto.randomBytes(48));
   const challenge = b64(crypto.createHash('sha256').update(verifier).digest());
@@ -55,22 +69,29 @@ export function startSignIn({ hostId, clientId = null, idTokenHint = null } = {}
     ...(clientId ? {} : { agent_name_hint: AGENT_NAME }),
     ext_agent_host_id: hostId,
     ...(idTokenHint ? { id_token_hint: idTokenHint } : {}),
-    response_type: 'code', redirect_uri: REDIRECT_URI, scope: SCOPE, resource: RESOURCE,
+    response_type: 'code', redirect_uri: redirectUri, scope: SCOPE, resource: RESOURCE,
     state, nonce, code_challenge_method: 'S256', code_challenge: challenge
   });
-  return { url: `${AUTHORIZE_URL}?${q}`, pending: { state, nonce, verifier, clientId, hostId, at: Date.now() } };
+  return { url: `${AUTHORIZE_URL}?${q}`, pending: { state, nonce, verifier, clientId, hostId, redirectUri, at: Date.now() } };
 }
 
 /**
- * The address the browser ended on, pasted back: { ok, code, clientId } or { ok:false, error }.
- * Takes the whole URL or just its query.
+ * The full callback forwarded by the local helper: { ok, code, clientId } or { ok:false, error }.
  */
 export function parseCallback(raw, pending, now = Date.now()) {
   if (!pending || now - pending.at > PENDING_TTL_MS) return { ok: false, error: 'this sign-in has expired; start it again' };
   const s = String(raw || '').trim();
-  let q;
-  try { q = new URL(s).searchParams; } catch { q = new URLSearchParams(s.replace(/^[^?]*\?/, '')); }
-  if (q.get('state') !== pending.state) return { ok: false, error: 'that address belongs to another sign-in; start again and paste the newest one' };
+  if (s.length > 8192) return { ok: false, error: 'invalid callback address' };
+  let url;
+  try { url = new URL(s); } catch { return { ok: false, error: 'invalid callback address' }; }
+  if (url.username || url.password || url.hash || url.origin + url.pathname !== pending.redirectUri) {
+    return { ok: false, error: 'the callback address does not match this sign-in' };
+  }
+  const q = url.searchParams;
+  if (['state', 'code', 'client_id', 'error'].some(key => q.getAll(key).length > 1) || (q.has('error') && q.has('code'))) {
+    return { ok: false, error: 'invalid callback address' };
+  }
+  if (q.get('state') !== pending.state) return { ok: false, error: 'that address belongs to another sign-in; continue in the browser opened by the login helper' };
   if (q.get('error')) return { ok: false, error: q.get('error') === 'access_denied' ? 'ChatGPT plan use was not allowed' : 'ChatGPT said: ' + q.get('error').slice(0, 80) };
   const code = q.get('code');
   if (!code) return { ok: false, error: 'no code in that address' };
@@ -91,7 +112,7 @@ async function postForm(fetchImpl, url, fields) {
 
 /** The code for tokens. { ok, tokens } or { ok:false, error } */
 export async function exchangeCode(fetchImpl, pending, code, clientId) {
-  const r = await postForm(fetchImpl, TOKEN_URL, { grant_type: 'authorization_code', client_id: clientId, code, code_verifier: pending.verifier, redirect_uri: REDIRECT_URI, resource: RESOURCE });
+  const r = await postForm(fetchImpl, TOKEN_URL, { grant_type: 'authorization_code', client_id: clientId, code, code_verifier: pending.verifier, redirect_uri: loopbackRedirectUri(pending.redirectUri), resource: RESOURCE });
   if (r.status !== 200 || !r.data?.access_token) return { ok: false, error: `the token exchange failed (${r.status}${r.data?.error ? ' ' + r.data.error : ''})` };
   return { ok: true, tokens: r.data };
 }

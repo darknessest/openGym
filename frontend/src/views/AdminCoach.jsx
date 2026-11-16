@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useUI } from '../store/useUI.js'
 import { useStore } from '../store/useStore.js'
 import { api } from '../lib/api.js'
+import { chatgptHandoff } from '../lib/chatgpt-handoff.js'
 import Icon from '../components/Icon.jsx'
 import { Button, Switch, TextArea, TextField } from '../components/ui.jsx'
 import { confirmSheet } from '../sheets.jsx'
@@ -55,7 +56,8 @@ const RUNTIME_IDS = ['claude', 'codex']
 // One line where the key is pasted, for the two providers where a key costs less than people think.
 // Claude Max, Ultra and Team include monthly API credits (support.claude.com/en/articles/17154008);
 // Gemini's key from AI Studio is free to start with.
-export function ProviderHint({ id }) {
+export function ProviderHint({ id, worker = false }) {
+  if (worker && (id === 'anthropic' || id === 'claude')) return <div className="adm-hint adm-tip"><Icon name="lightbulb" /><span><b>Claude uses the Anthropic API here.</b> Add an <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer">Anthropic API key</a>. Claude subscriptions and Claude Code setup tokens cannot sign in on Workers. To use your Claude subscription, add openGym inside Claude through Settings → Use your subscription.</span></div>
   if (id === 'anthropic' || id === 'claude') return <div className="adm-hint adm-tip"><Icon name="lightbulb" /><span><b>Got Claude Max, Ultra or Team?</b> Your plan includes monthly API credits (link the Console organisation once under Settings, Billing on claude.ai). <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer">Create a key here</a>.</span></div>
   if (id === 'gemini') return <div className="adm-hint adm-tip"><Icon name="lightbulb" /><span><b>A free key in a minute.</b> <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Open Google AI Studio</a>, press Create API key, copy it, then Add API key here and Test the Coach.</span></div>
   return null
@@ -73,6 +75,10 @@ export default function AdminCoach() {
   // The last "Test the Coach" outcome, shown inline where the button is rather than only as a
   // toast that is gone before anyone has read the provider's reason.
   const [testResult, setTestResult] = useState(null)
+  const [signInResult, setSignInResult] = useState(null)
+  const mounted = useRef(false)
+  const callbackConsumed = useRef(false)
+  const testAbort = useRef(null)
   // Model servers found next to the api (Ollama, LM Studio, llama.cpp), after "Find".
   const [found, setFound] = useState(null)
   const discover = async () => {
@@ -86,8 +92,35 @@ export default function AdminCoach() {
   // that once per boot, and the Plan tab's Coach card hangs off it: without the re-read, an admin
   // who has just switched the Coach on and connected it finds no Coach anywhere until a reload,
   // which reads as a setup that failed (Discord #install-help, 2026-09-19).
-  const load = () => api('/api/admin/coach').then(r => { setD(r); setModels(r.knownModels || null); useStore.getState().refreshConfig() }).catch(e => toast(e.message || 'Failed to load'))
-  useEffect(() => { load() }, [])
+  const load = () => api('/api/admin/coach').then(r => {
+    if (!mounted.current) return
+    setD(r); setModels(r.knownModels || null); useStore.getState().refreshConfig()
+  }).catch(e => { if (mounted.current) toast(e.message || 'Failed to load') })
+  useEffect(() => {
+    mounted.current = true
+    // Bootstrap already stripped the fragment before login/router code ran. Consume the
+    // memory-only handoff synchronously, before any request, including StrictMode replay.
+    if (!callbackConsumed.current && chatgptHandoff.callback) {
+      const callback = chatgptHandoff.callback
+      chatgptHandoff.callback = null
+      callbackConsumed.current = true
+      setSignInResult({ pending: true })
+      const finish = async () => {
+        try {
+          const result = await api('/api/admin/coach/chatgpt/finish', { method: 'POST', body: JSON.stringify({ callback }) })
+          if (!mounted.current) return
+          setSignInResult({ ok: true, account: result.account })
+          toast('ChatGPT connected' + (result.account ? ' as ' + result.account : ''))
+        } catch (e) {
+          if (mounted.current) setSignInResult({ ok: false, error: e.message || 'Could not complete ChatGPT sign-in. Run the helper again.' })
+        } finally {
+          if (mounted.current) await load()
+        }
+      }
+      finish()
+    } else if (!callbackConsumed.current) load()
+    return () => { mounted.current = false; testAbort.current?.abort() }
+  }, [])
 
   const patch = async body => {
     setBusy(true)
@@ -104,16 +137,41 @@ export default function AdminCoach() {
     setBusy(false)
   }
   const test = async () => {
+    testAbort.current?.abort()
+    const controller = new AbortController()
+    testAbort.current = controller
+    const { signal } = controller
+    const deadline = Date.now() + 5 * 60 * 1000
     setBusy(true); setTestResult({ pending: true })
     try {
       // The server gives the provider up to 90 s for this round-trip (api/coach/jobs.js testRun),
       // longer than api()'s default for a request; a slow local model must still get its answer.
-      const r = await api('/api/admin/coach/test', { method: 'POST', body: '{}', timeout: 150000 })
+      let r = await api('/api/admin/coach/test', { method: 'POST', body: '{}', timeout: 150000 })
+      const id = r.job?.id || r.id
+      while (r.pending && !signal.aborted) {
+        if (!id) throw new Error('The server did not return a Coach test job. Try again.')
+        if (Date.now() >= deadline) throw new Error('The Coach test has not finished after five minutes. Check Activity before trying again.')
+        // Worker tests run as jobs. Aborting this wait stops polling as soon as the card leaves.
+        await new Promise(resolve => {
+          const cancel = () => { clearTimeout(timer); resolve() }
+          const timer = setTimeout(() => { signal.removeEventListener('abort', cancel); resolve() }, Math.min(1500, deadline - Date.now()))
+          signal.addEventListener('abort', cancel, { once: true })
+        })
+        if (signal.aborted) return
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) throw new Error('The Coach test has not finished after five minutes. Check Activity before trying again.')
+        r = await api('/api/admin/coach/test?id=' + encodeURIComponent(id), { timeout: Math.min(20000, remaining) })
+      }
+      if (signal.aborted || !mounted.current) return
       setTestResult(r)
       toast(r.ok ? 'Coach test passed' : 'Test failed')
       await load()
-    } catch (e) { setTestResult({ ok: false, error: e.message }); toast(e.message) }
-    setBusy(false)
+    } catch (e) {
+      if (!signal.aborted && mounted.current) { setTestResult({ ok: false, error: e.message }); toast(e.message) }
+    } finally {
+      if (!signal.aborted && mounted.current) setBusy(false)
+      if (testAbort.current === controller) testAbort.current = null
+    }
   }
   // A number input hands back "" for anything it cannot parse, and +"" is 0, which the hint on
   // this card calls "no limit". So an admin who cleared the box to retype and clicked elsewhere
@@ -130,14 +188,22 @@ export default function AdminCoach() {
     setBusy(false)
   }
 
-  if (!d) return <div className="card"><div className="muted small">Loading Coach status…</div></div>
+  const signInMessage = signInResult && <div role="status" className={'adm-result ' + (signInResult.pending ? '' : signInResult.ok ? 'ok' : 'bad')}>
+    {signInResult.pending ? 'Completing ChatGPT sign-in…'
+      : signInResult.ok ? <><b>ChatGPT connected</b>{signInResult.account || 'Your ChatGPT plan is ready to use.'}</>
+        : <><b>ChatGPT sign-in failed</b>{signInResult.error} Run the helper again to start a fresh sign-in.</>}
+  </div>
+
+  if (!d) return <div className="card">{signInMessage}<div className="muted small">Loading Coach status…</div></div>
 
   if (d.disabledByEnv) return <div className="card">
     <h2 style={{ margin: '0 0 6px' }}>AI Coach</h2>
+    {signInMessage}
     <div className="adm-lead">Force-disabled by <code>COACH_DISABLED</code> in the server's environment. Remove that variable and restart to configure the Coach here.</div>
   </div>
 
   const meta = d.providers.find(p => p.id === d.provider) || {}
+  const setupToken = !!meta.setupToken && !d.worker
   const authState = d.auth?.state
   const authed = authState === 'connected' || authState === 'not-required' || authState === 'optional'
   const needsEndpoint = !!meta.baseUrl
@@ -153,13 +219,13 @@ export default function AdminCoach() {
 
   // Chips, grouped.
   const groups = [
-    { title: 'Paste an API key', hint: 'Plain HTTPS to the provider. Works on the default api image, nothing extra to install.', items: d.providers.filter(p => p.http) },
-    { title: 'Runs a local AI runtime', hint: 'Needs the bigger api image built with --target coach.', items: d.providers.filter(p => RUNTIME_IDS.includes(p.id)) },
+    { title: 'Paste an API key', hint: d.worker ? 'Runs on Cloudflare Workers over HTTPS. Claude uses an Anthropic API key; local AI runtimes and Claude Code setup tokens are unavailable here.' : 'Plain HTTPS to the provider. Works on the default api image, nothing extra to install.', items: d.providers.filter(p => p.http && (!d.worker || !RUNTIME_IDS.includes(p.id))) },
+    { title: 'Runs a local AI runtime', hint: 'Needs the bigger api image built with --target coach.', items: d.worker ? [] : d.providers.filter(p => RUNTIME_IDS.includes(p.id)) },
     { title: 'Sign in with your plan (preview)', hint: 'Your ChatGPT Plus or Pro plan pays for the Coach. Switched on with COACH_CHATGPT_PLAN=on; for your own instance (OpenAI asks hosted apps to apply first).', items: d.providers.filter(p => p.signIn === 'chatgpt') },
     { title: 'Testing', hint: 'A built-in fake that answers instantly, so the whole loop can be tried without an account.', items: d.providers.filter(p => TESTING_IDS.includes(p.id)) }
   ]
 
-  const hasCredentialStep = !!(meta.setupToken || meta.apiKey || meta.signIn === 'chatgpt')
+  const hasCredentialStep = !!(setupToken || meta.apiKey || meta.signIn === 'chatgpt')
   const lists = !!(meta.http || meta.signIn === 'chatgpt')
   // The model this provider was explicitly GIVEN — as opposed to `d.model`, which falls back to
   // the provider's own default. Both halves of the Model step (the dropdown and the free-text
@@ -182,12 +248,13 @@ export default function AdminCoach() {
 
   // Off = a quiet, optional feature: one clean pitch and one button, no half-dimmed controls.
   if (!d.enabled) return <div className="card">
+    {signInMessage}
     <div className="adm-hero">
       <div className="adm-hero-av"><Icon name="sparkles" /></div>
       <h2>AI Coach</h2>
       <p>An optional coach that designs training plans and reviews what people actually log. Off right now, so nobody sees it anywhere in the app.</p>
       <div className="adm-hero-feats">
-        <div><Icon name="key" /><span><b>Bring any AI.</b> An API key from Anthropic, OpenAI or Gemini, or a free local model via Ollama.</span></div>
+        <div><Icon name="key" /><span><b>Bring any AI.</b> {d.worker ? 'An API key from Anthropic, OpenAI or Gemini, or connect your ChatGPT plan when enabled. Providers run over HTTPS on Cloudflare Workers.' : 'An API key from Anthropic, OpenAI or Gemini, or a free local model via Ollama.'}</span></div>
         <div><Icon name="chat" /><span><b>Or skip the key.</b> With <code>MCP=on</code> everyone can add openGym to the Claude, ChatGPT or Gemini they already pay for: Settings, Use your subscription.</span></div>
         <div><Icon name="shield" /><span><b>Private by design.</b> A strict allowlist decides what leaves; every change needs the user's yes and can be undone.</span></div>
         <div><Icon name="person" /><span><b>Each user decides.</b> Turning it on only makes the Coach available; every person consents for themselves.</span></div>
@@ -205,6 +272,7 @@ export default function AdminCoach() {
       <span className={'adm-pill ' + (live ? 'ok' : 'warn')}>{live ? 'ready' : 'not ready'}</span>
       <span>{status}</span>
     </div>
+    {signInMessage}
     {!live && <div className="adm-progress" aria-hidden="true"><i style={{ width: Math.round(doneCount / flags.length * 100) + '%' }} /></div>}
     <div className="adm-lead">
       {live ? 'Users find the Coach under Plan → Coach. This switch is the only place it can be turned off for everyone.'
@@ -229,15 +297,15 @@ export default function AdminCoach() {
 
       {/* ---------- endpoint (compatible only) ---------- */}
       {needsEndpoint && <Step n={num()} title="Endpoint" hint={d.baseUrl || 'Where the model runs'} done={step2Done} {...stepAt()}>
-        <div className="adm-hint">The address of any server that speaks OpenAI's chat API: <b>Ollama</b>, <b>LM Studio</b>, <b>vLLM</b>, <b>OpenRouter</b>, or a gateway of your own. The base as your provider documents it, with or without its version (<code>/v1</code>, <code>/v4</code>), and no key in the URL.</div>
+        <div className="adm-hint">{d.worker ? <>A publicly reachable <b>HTTPS</b> endpoint that speaks OpenAI's chat API. Workers cannot reach models on your computer or private network.</> : <>The address of any server that speaks OpenAI's chat API: <b>Ollama</b>, <b>LM Studio</b>, <b>vLLM</b>, <b>OpenRouter</b>, or a gateway of your own.</>} The base as your provider documents it, with or without its version (<code>/v1</code>, <code>/v4</code>), and no key in the URL.</div>
         <div className="adm-field">
           <label>Base URL</label>
           <TextField key={d.baseUrl || ''} defaultValue={d.baseUrl || ''} placeholder="http://ollama:11434  or  https://openrouter.ai/api" inputMode="url" autoCapitalize="none" autoCorrect="off"
             onBlur={e => e.target.value !== (d.baseUrl || '') && patch({ baseUrl: e.target.value })} />
         </div>
-        <div className="adm-actions">
+        {!d.worker && <div className="adm-actions">
           <Button size="sm" variant="tinted" icon="magnifier" disabled={busy} onClick={discover}>Find Ollama or LM Studio</Button>
-        </div>
+        </div>}
         {found && (found.length
           ? found.map(f => <div key={f.base} className="adm-kv"><span className="k">{f.kind} · {f.models.length} models</span>
             <span className="v"><Button size="sm" disabled={busy} onClick={() => patch({ baseUrl: f.base, ...(f.models[0] && !chosenModel ? { model: f.models[0] } : {}) })}>Use {f.base}</Button></span></div>)
@@ -281,18 +349,18 @@ export default function AdminCoach() {
             The stored credential can't be decrypted. This usually means <code>./data</code> was restored without its <code>secret</code> file. Add the key again to fix it.
           </div>}
           {authState === 'optional' && <div className="adm-hint">This endpoint works without a key. Add one only if your server asks for it (OpenRouter does; a model on your own network usually does not).</div>}
-          {authState === 'none' && meta.signIn !== 'chatgpt' && <div className="adm-hint">{meta.setupToken
+          {authState === 'none' && meta.signIn !== 'chatgpt' && <div className="adm-hint">{setupToken
             ? 'Paste either a Claude Code setup token (your subscription) or an Anthropic API key (pay per use).'
             : 'Paste an API key from the provider\'s console. It is stored encrypted on this server and sent to the provider only while a job runs.'}</div>}
-          {authState === 'none' && meta.setupToken && <SetupTokenRisk />}
-          {authState === 'none' && <ProviderHint id={d.provider} />}
+          {authState === 'none' && setupToken && <SetupTokenRisk />}
+          {authState === 'none' && <ProviderHint id={d.provider} worker={d.worker} />}
           <div className="adm-actions">
-            {meta.signIn === 'chatgpt' && <ChatGptSignIn onDone={load} />}
+            {meta.signIn === 'chatgpt' && <ChatGptSignIn />}
             {meta.signIn === 'pkce' && <Button size="sm" variant="primary" icon="person" disabled={busy}
               onClick={() => import('../lib/openrouter-signin.js').then(m => m.startWebSignIn({ back: '#/admin' }))}>Sign in with OpenRouter</Button>}
-            {meta.setupToken && <Button size="sm" variant="primary" icon="key" disabled={busy}
+            {setupToken && <Button size="sm" variant="primary" icon="key" disabled={busy}
               onClick={() => openSheet(close => <SetupTokenSheet close={close} onDone={load} label={meta.label} />)}>Add Claude Code token</Button>}
-            {meta.apiKey && <Button size="sm" variant={meta.setupToken || meta.signIn ? undefined : 'primary'} icon="lock" disabled={busy}
+            {meta.apiKey && <Button size="sm" variant={setupToken || meta.signIn ? undefined : 'primary'} icon="lock" disabled={busy}
               onClick={() => openSheet(close => <ApiKeySheet close={close} onDone={load} label={meta.label} placeholder={meta.keyPlaceholder} optional={meta.keyOptional} />)}>
               {meta.keyOptional ? 'Add API key (optional)' : 'Add API key'}</Button>}
             {meta.keyUrl && <Button size="sm" variant="tinted" icon="link" onClick={() => window.open(meta.keyUrl, '_blank', 'noopener')}>Get a key</Button>}
@@ -303,7 +371,7 @@ export default function AdminCoach() {
 
       {/* ---------- model ---------- */}
       <Step n={num()} title="Model" hint={d.model || (meta.defaultModel ? 'default: ' + meta.defaultModel : 'not chosen yet')} done={step4Done} {...stepAt()}>
-        <div className="adm-hint">{meta.http
+        <div className="adm-hint">{lists
           ? 'Which model the provider should use. "List models" asks the provider for its current list, so nothing here goes stale.'
           : 'Optional. Leave it empty to use the runtime\'s own default.'}</div>
         <div className="adm-field">
@@ -338,7 +406,7 @@ export default function AdminCoach() {
               : <><b>Failed</b>{testResult.error || 'No answer from the provider.'}</>}
         </div>}
         <div className="adm-kv" style={{ marginTop: 10 }}>
-          <span className="k">Runtime</span>
+          <span className="k">{d.worker ? 'Provider connection' : 'Runtime'}</span>
           <span className="v">{d.runtime.ok ? <span className="adm-pill ok">ready</span> : <span className="adm-pill bad">missing</span>}{d.runtime.version ? <div className="dim small">{d.runtime.version}</div> : null}{!d.runtime.ok && d.runtime.error ? <div className="small" style={{ color: 'var(--red)' }}>{d.runtime.error}</div> : null}</span>
         </div>
       </Step>
@@ -503,33 +571,40 @@ function SetupTokenRisk() {
   return <div className="adm-risk" role="note"><Icon name="warning" /><span>{SETUP_TOKEN_RISK}</span></div>
 }
 
-/* Sign in with ChatGPT for plan usage (api/coach/chatgpt-plan.js). OpenAI sends the browser back
-   to a loopback address on this computer, which no page answers: the address it shows is what
-   finishes the sign-in here. */
-function ChatGptSignIn({ onDone }) {
-  const toast = useUI(s => s.toast)
-  const [started, setStarted] = useState(false)
-  const [cb, setCb] = useState('')
+/* The helper owns the loopback listener on the browser's computer; the server owns PKCE and
+   tokens. Bootstrap preserves the helper coordinates through owner authentication. */
+function ChatGptSignIn() {
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const mounted = useRef(false)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const relay = chatgptHandoff.relay
   const start = async () => {
+    if (!relay || busy) return
     setBusy(true)
-    try { const r = await api('/api/admin/coach/chatgpt/start', { method: 'POST', body: '{}' }); window.open(r.url, '_blank', 'noopener'); setStarted(true) }
-    catch (e) { toast(e.message) }
-    setBusy(false)
-  }
-  const finish = async () => {
-    setBusy(true)
-    try { const r = await api('/api/admin/coach/chatgpt/finish', { method: 'POST', body: JSON.stringify({ callback: cb.trim() }) }); toast('Signed in' + (r.account ? ' as ' + r.account : '')); setCb(''); setStarted(false); onDone() }
-    catch (e) { toast(e.message) }
-    setBusy(false)
+    setError(null)
+    try {
+      const result = await api('/api/admin/coach/chatgpt/start', {
+        method: 'POST', body: JSON.stringify({ redirectUri: `http://127.0.0.1:${relay.port}/auth/callback`, relayNonce: relay.relayNonce })
+      })
+      if (!mounted.current) return
+      const url = new URL(result.url)
+      if (url.origin !== 'https://auth.openai.com' || url.pathname !== '/api/accounts/authorize' || url.username || url.password) throw new Error('The server returned an invalid ChatGPT sign-in address.')
+      window.location.assign(url.href)
+    } catch (e) {
+      if (mounted.current) { setError(e.message || 'Could not start ChatGPT sign-in. Run the helper again.'); setBusy(false) }
+    }
   }
   return <div style={{ flexBasis: '100%' }}>
-    <Button size="sm" variant="primary" icon="person" disabled={busy} onClick={start}>Continue with ChatGPT</Button>
-    {started && <>
-      <div className="adm-hint" style={{ margin: '10px 0 6px' }}>Allow plan use on the ChatGPT page. It then sends you to <code>127.0.0.1:1455</code>, which shows an error page: that is expected. Copy that whole address from the address bar and paste it here.</div>
-      <TextField value={cb} placeholder="http://127.0.0.1:1455/auth/callback?code=…" autoCapitalize="none" autoCorrect="off" onChange={e => setCb(e.target.value)} />
-      <div className="adm-actions" style={{ marginTop: 8 }}><Button size="sm" variant="primary" icon="check" disabled={busy || !cb.trim()} onClick={finish}>Finish sign-in</Button></div>
+    {relay ? <>
+      <div className="adm-hint">Keep the login helper running on this computer. Continue to ChatGPT, allow plan use, and you will return here automatically. The helper waits for up to 15 minutes.</div>
+      <Button size="sm" variant="primary" icon="person" disabled={busy} onClick={start}>Continue with ChatGPT</Button>
+    </> : <>
+      <div className="adm-hint">On the computer where you use this browser, <a href="/chatgpt-login.mjs" download="chatgpt-login.mjs">download the login helper</a>. Install Node.js 22 or newer if needed, then open a terminal in the download folder and run:</div>
+      <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}><code>{`node chatgpt-login.mjs ${window.location.origin}`}</code></pre>
+      <div className="adm-hint">Keep the terminal open. The helper opens this admin page with a Continue with ChatGPT button. Use that page to complete sign-in on this computer.</div>
     </>}
+    {error && <div role="alert" className="adm-result bad"><b>Could not start sign-in</b>{error}</div>}
     <div className="adm-hint" style={{ margin: '6px 0 0' }}>Uses your ChatGPT plan's limits, shared with ChatGPT itself. <a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">Manage usage</a> there.</div>
   </div>
 }

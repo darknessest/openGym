@@ -24,7 +24,7 @@
   ],
   "vars": {
     "ORIGIN": "https://opengym.example.com", "RP_ID": "opengym.example.com",
-    "INVITE_ONLY": "true", "PASSWORD_LOGIN": "true"
+    "INVITE_ONLY": "true", "PASSWORD_LOGIN": "true", "COACH_CHATGPT_PLAN": "true"
   },
   "observability": {"enabled": true}
 }

@@ -6,6 +6,7 @@ import { Tokens } from './tokens.js';
 import { mcpRequest } from './mcp.js';
 import { mediaRoutes, mediaConfig, mediaCleanup, scheduleMedia } from './media.js';
 import { Push } from './push.js';
+import { Coach } from './coach.js';
 import { HttpError, json } from './http.js';
 import { excusedOn, nudgeFor } from '../api/nudge.js';
 import { watchRoutes } from './watch.js';
@@ -19,6 +20,7 @@ export class Gym extends DurableObject {
     this.accounts = new Accounts(this.store, env);
     this.tokens = new Tokens(this.store, this.accounts);
     this.push = new Push(this.store, env, ctx);
+    this.coach = new Coach(this.store, env, ctx, this.push);
   }
 
   async fetch(request) {
@@ -31,7 +33,7 @@ export class Gym extends DurableObject {
         return json({
           invite_only: this.env.INVITE_ONLY === 'true', allow_guest: false,
           password_login: this.env.PASSWORD_LOGIN === 'true', signed_in: !!user,
-          media: mediaConfig, coach_supported: false, mcp_auth: 'token',
+          media: mediaConfig, coach_supported: true, coach: this.coach.publicConfig(user), mcp_auth: 'token',
           ...(user ? { api_tokens: true, mcp: true } : {})
         });
       }
@@ -41,11 +43,15 @@ export class Gym extends DurableObject {
         () => this.tokens.handle(request),
         () => mediaRoutes(this.store, this.env, request, user, this.ctx),
         () => watchRoutes(this.store, request, user),
-        () => this.push.handle(request, user)
+        () => this.push.handle(request, user),
+        () => this.coach.handle(request, user)
       ]) {
         const response = await handler();
         if (response) {
-          if (request.method !== 'GET') await scheduleMedia(this.store, this.ctx);
+          if (request.method !== 'GET') {
+            await scheduleMedia(this.store, this.ctx);
+            await this.coach.wake();
+          }
           return response;
         }
       }
@@ -70,11 +76,14 @@ export class Gym extends DurableObject {
   }
 
   async alarm() {
-    try {
-      await mediaCleanup(this.store, this.env, this.ctx);
-    } catch (error) {
+    const results = await Promise.allSettled([
+      mediaCleanup(this.store, this.env, this.ctx),
+      this.coach.alarm()
+    ]);
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) {
       await scheduleAlarm(this.ctx, Date.now() + 60000);
-      throw error;
+      throw failed.reason;
     }
   }
 
