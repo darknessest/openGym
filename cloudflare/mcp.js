@@ -3,14 +3,15 @@ import { buildServer, VERSION } from '../mcp/src/server.js';
 import { createRemoteProfile } from '../mcp/src/remote.js';
 import { withProfile } from '../mcp/src/state.js';
 import { HttpError, json, readJson } from './http.js';
+import { DEFAULT_SCOPE } from '../api/oauth.js';
 
 const MAX_BODY = 1024 * 1024;
 const BEARER = /^Bearer (ogt_[A-Za-z0-9_-]{43})$/;
-const AUTH_HEADERS = { 'WWW-Authenticate': 'Bearer realm="openGym"' };
 
 // The outer Worker owns origin, CORS and admission limits. Every API operation below
 // goes directly to the personal Durable Object, carrying the request's scoped token.
 export async function mcpRequest(request, env) {
+  const authHeaders = { 'WWW-Authenticate': `Bearer realm="openGym", error="invalid_token", resource_metadata="${env.ORIGIN.replace(/\/+$/, '')}/.well-known/oauth-protected-resource/mcp", scope="${DEFAULT_SCOPE}"` };
   const path = new URL(request.url).pathname;
   if (path === '/mcp/health') {
     return request.method === 'GET'
@@ -21,7 +22,7 @@ export async function mcpRequest(request, env) {
   if (request.method !== 'POST') return json({ error: 'POST required' }, 405, { Allow: 'POST' });
 
   const token = BEARER.exec(request.headers.get('authorization') || '')?.[1];
-  if (!token) return json({ error: 'an openGym API token is required' }, 401, AUTH_HEADERS);
+  if (!token) return json({ error: 'an openGym API token is required' }, 401, authHeaders);
 
   let parsedBody;
   try {
@@ -53,7 +54,7 @@ export async function mcpRequest(request, env) {
         // merge. All other failures are sanitized before apiFetch sees their body.
         if (!response.ok && response.status !== 409) {
           if (response.status === 401) {
-            apiError = json({ error: 'openGym did not accept this token' }, 401, AUTH_HEADERS);
+              apiError = json({ error: 'openGym did not accept this token' }, 401, authHeaders);
           } else if (response.status === 429) {
             apiError = json({ error: 'too many requests' }, 429, {
               'Retry-After': response.headers.get('retry-after') || '60',

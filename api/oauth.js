@@ -39,7 +39,7 @@ export const CODE_TTL_MS = 10 * 60000;
 export const ACCESS_TTL_MS = 24 * 3600000;
 /** A refresh answer that got lost on the way may be retried with the old refresh token this long. */
 export const REFRESH_GRACE_MS = 60000;
-const CLIENT_IDLE_MS = 90 * 86400000;
+export const CLIENT_IDLE_MS = 90 * 86400000;
 const REFRESH_PREFIX = 'ogr_';
 const rnd = n => crypto.randomBytes(n).toString('base64url');
 const b64sha = v => crypto.createHash('sha256').update(v).digest('base64url');
@@ -256,7 +256,7 @@ export function describeRequest(pending, id, now = Date.now()) {
 
 /**
  * The person said yes: the code goes back on the redirect. `makeToken(name, scopes, days, connector)`
- * makes the ogt_ token and returns { value, scopes, expiresIn, row }.
+ * creates the scoped token row and returns { row }. Usable credentials are issued at exchange.
  */
 export function approve(pending, codes, id, { scopes, days }, makeToken, now = Date.now()) {
   const r = pending.get(id);
@@ -264,17 +264,12 @@ export function approve(pending, codes, id, { scopes, days }, makeToken, now = D
   pending.delete(id);
   const connector = { assistant: r.assistant, client: r.clientId, name: r.clientName };
   const token = makeToken(`${r.clientName} (connector)`, scopes, days, connector);
-  let refreshToken = null, expiresIn = token.expiresIn;
-  if (token.row) token.row.connector = { ...(token.row.connector || {}), ...connector };
-  if (r.refresh && token.row) {
-    refreshToken = REFRESH_PREFIX + rnd(32);
-    token.row.connector.rh = rsha(refreshToken);
-    token.row.aexp = Math.min(now + ACCESS_TTL_MS, token.row.exp || Infinity);
-    expiresIn = Math.round((token.row.aexp - now) / 1000);
-  }
+  token.row.connector = { ...(token.row.connector || {}), ...connector };
   for (const [k, v] of codes) if (now - v.at > CODE_TTL_MS) codes.delete(k);
   const code = rnd(32);
-  codes.set(code, { token: token.value, refresh: refreshToken, scope: scopeString(token.scopes), expiresIn, clientId: r.clientId, redirect: r.redirect, challenge: r.challenge, at: now });
+  // A persisted code contains only a row reference, never a usable access/refresh token.
+  codes.set(code, { tokenId: token.row.id, userId: token.row.userId, refresh: r.refresh,
+    resource: r.resource, clientId: r.clientId, redirect: r.redirect, challenge: r.challenge, at: now });
   return { ok: true, redirect: withQuery(r.redirect, { code, state: r.state || undefined, iss: r.issuer || undefined }) };
 }
 /** The person said no. */
@@ -304,13 +299,27 @@ export function exchange(codes, form, db, now = Date.now()) {
   // Single use whatever happens next: a code that was tried is gone.
   codes.delete(code);
   if (!c || now - c.at > CODE_TTL_MS) return bad('invalid_grant', 'the code is unknown, used or expired');
-  if (form.get('client_id') && form.get('client_id') !== c.clientId) return bad('invalid_grant', 'the code was issued to another client');
-  if (form.get('redirect_uri') && !sameRedirect(c.redirect, form.get('redirect_uri'))) return bad('invalid_grant', 'redirect_uri does not match');
+  if (form.get('client_id') !== c.clientId) return bad('invalid_grant', 'the code was issued to another client');
+  if (!sameRedirect(c.redirect, form.get('redirect_uri'))) return bad('invalid_grant', 'redirect_uri does not match');
+  if (form.get('resource') && c.resource && form.get('resource') !== c.resource) return bad('invalid_target', 'resource does not match');
   const verifier = form.get('code_verifier') || '';
   if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier) || b64sha(verifier) !== c.challenge) return bad('invalid_grant', 'code_verifier does not match the challenge');
+  const row = (db.apiTokens || []).find(r => r.id === c.tokenId && r.userId === c.userId);
+  const user = (db.users || []).find(u => u.id === c.userId);
+  if (!row || !user || user.disabled || (row.exp && row.exp <= now) || row.sv !== (user.sv || 0)) {
+    return bad('invalid_grant', 'the connection has ended');
+  }
+  const access = rotateToken(row);
+  let refreshToken = null;
+  if (c.refresh) {
+    refreshToken = REFRESH_PREFIX + rnd(32);
+    row.connector.rh = rsha(refreshToken);
+    row.aexp = Math.min(now + ACCESS_TTL_MS, row.exp || Infinity);
+  }
+  const expiresIn = (row.aexp || row.exp) ? Math.max(0, Math.round(((row.aexp || row.exp) - now) / 1000)) : null;
   const client = clientOf(db, c.clientId);
   if (client) client.used = now;
-  return { status: 200, body: { access_token: c.token, token_type: 'Bearer', scope: c.scope, ...(c.expiresIn ? { expires_in: c.expiresIn } : {}), ...(c.refresh ? { refresh_token: c.refresh } : {}) } };
+  return { status: 200, body: { access_token: access, token_type: 'Bearer', scope: scopeString(row.scopes), ...(expiresIn ? { expires_in: expiresIn } : {}), ...(refreshToken ? { refresh_token: refreshToken } : {}) } };
 }
 
 /**

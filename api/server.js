@@ -2497,7 +2497,7 @@ function oauthRoutes() {
           // At the token limit an earlier connection of an assistant makes room, the one used least
           // recently: reconnecting Claude ten times must not end at a screen that cannot say yes.
           made = createToken(db, user, { name, scopes, days, evict: row => !!row.connector });
-          return { value: made.token, scopes: made.row.scopes, expiresIn: made.row.exp ? Math.round((made.row.exp - Date.now()) / 1000) : null, row: made.row };
+          return { row: made.row };
         });
         if (!r.ok) return json(res, r.status, { error: r.error, code: 'expired' });
         saveDb();

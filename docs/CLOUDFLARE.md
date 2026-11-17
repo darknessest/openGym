@@ -110,9 +110,43 @@ and tokens for that profile. Full phone/browser session tokens are refused at MC
 cannot administer accounts, read other profiles, access private uploads, or call account routes.
 Only token hashes are stored. Requests check token validity afresh.
 
-This endpoint uses token authentication for local clients. Hosted connector OAuth, dynamic
-client registration, and subscription imports are not provided. The general upstream
-[MCP over HTTPS guide](MCP_REMOTE.md) documents the separate Docker deployment's OAuth features.
+This endpoint also supports OAuth for hosted ChatGPT and Claude connectors. Add the HTTPS MCP
+address as a custom connector using OAuth. The Worker supports public-client dynamic registration,
+PKCE S256, one-time authorization codes, rotating refresh tokens and revocation. Client metadata
+documents (CIMD) are not advertised by the Worker; clients should use dynamic registration.
+The existing [MCP over HTTPS guide](MCP_REMOTE.md) describes the consent screen and connector setup.
+Existing scoped Bearer-token clients continue to use the same address and credentials.
+
+OAuth consent uses your existing openGym browser account. Choose only the categories the assistant
+needs and an expiry. For read-and-propose usage, keep ChatGPT's plugin permissions set to read
+without asking and ask before changes. The MCP instructions request dry-run previews before plan
+changes; write tools carry write annotations. Confirmation is enforced by the ChatGPT client, not
+by a separate server-side proposal inbox. An `apply` scope permits writes after client approval.
+
+Pending sign-ins and codes are bounded, expire after ten minutes and survive Worker restarts in
+the existing Durable Object. Code records reference a scoped token row; usable access and refresh
+credentials are generated only at exchange. Revocation and account session-version changes also
+invalidate connector credentials.
+
+### OAuth behind Cloudflare Access
+
+Keep the browser, consent and normal API paths protected by your existing Access identity and
+device policies. Create a separate Bypass application with only these public protocol paths:
+
+- `/mcp` (including descendants)
+- `/.well-known/oauth-authorization-server`
+- `/.well-known/openid-configuration`
+- `/.well-known/oauth-protected-resource` (including `/mcp` beneath it)
+- `/api/oauth/register`
+- `/api/oauth/token`
+- `/api/oauth/revoke`
+
+Access paths also match descendants; unimplemented descendants return Worker errors. Do not
+bypass all of `/api/oauth` or `/.well-known`. In particular, `/api/oauth/authorize`,
+`/api/oauth/request`, `/api/oauth/approve` and `/api/oauth/deny` remain behind Access. The consent
+routes also require a full openGym session and reject cross-site approval requests. Public
+OAuth POSTs are body-limited and rate-limited. `/mcp` stays publicly reachable with its own scoped
+Bearer-token authentication. Keep OPTIONS bypass to origin enabled for native preflights.
 
 ## First use and phone authentication
 

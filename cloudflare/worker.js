@@ -3,6 +3,7 @@ import { Store } from './store.js';
 import { Accounts } from './accounts.js';
 import { stateRoutes } from './state.js';
 import { Tokens } from './tokens.js';
+import { OAuth, OAUTH_PUBLIC_POSTS } from './oauth.js';
 import { mcpRequest } from './mcp.js';
 import { mediaRoutes, mediaConfig, mediaCleanup, scheduleMedia } from './media.js';
 import { Push } from './push.js';
@@ -19,6 +20,7 @@ export class Gym extends DurableObject {
     this.store = new Store(ctx.storage);
     this.accounts = new Accounts(this.store, env);
     this.tokens = new Tokens(this.store, this.accounts);
+    this.oauth = new OAuth(this.store, this.accounts, ctx);
     this.push = new Push(this.store, env, ctx);
     this.coach = new Coach(this.store, env, ctx, this.push);
   }
@@ -33,10 +35,12 @@ export class Gym extends DurableObject {
         return json({
           invite_only: this.env.INVITE_ONLY === 'true', allow_guest: false,
           password_login: this.env.PASSWORD_LOGIN === 'true', signed_in: !!user,
-          media: mediaConfig, coach_supported: true, coach: this.coach.publicConfig(user), mcp_auth: 'token',
+          media: mediaConfig, coach_supported: true, coach: this.coach.publicConfig(user), mcp_auth: 'oauth',
           ...(user ? { api_tokens: true, mcp: true } : {})
         });
       }
+      const oauthResponse = await this.oauth.handle(request);
+      if (oauthResponse) return oauthResponse;
       for (const handler of [
         () => this.accounts.handle(request),
         () => stateRoutes(this.store, request, user),
@@ -78,6 +82,7 @@ export class Gym extends DurableObject {
   async alarm() {
     const results = await Promise.allSettled([
       mediaCleanup(this.store, this.env, this.ctx),
+      this.oauth.prune(),
       this.coach.alarm()
     ]);
     const failed = results.find(result => result.status === 'rejected');
@@ -111,12 +116,13 @@ export default {
       } });
     }
     const nativePairing = request.method === 'POST' && ['/api/pair/redeem', '/api/watch/redeem'].includes(url.pathname);
-    if (!mcp && !['GET', 'HEAD'].includes(request.method) && !allowedOrigin && !nativePairing && !request.headers.get('authorization')?.startsWith('Bearer ')) return json({ error: 'origin required' }, 403);
+    const oauthPost = request.method === 'POST' && OAUTH_PUBLIC_POSTS.has(url.pathname);
+    if (!mcp && !['GET', 'HEAD'].includes(request.method) && !allowedOrigin && !nativePairing && !oauthPost && !request.headers.get('authorization')?.startsWith('Bearer ')) return json({ error: 'origin required' }, 403);
     // Reject floods before they reach the single database object or password verification.
     const key = 'opengym-personal:' + (request.headers.get('cf-connecting-ip') || 'unknown');
     let { success } = await env.API_RATE_LIMITER.limit({ key });
     if (success && request.method === 'POST' && (url.pathname.startsWith('/api/login/') ||
-        url.pathname.startsWith('/api/register/') || url.pathname.startsWith('/api/device-link/') || nativePairing)) {
+        url.pathname.startsWith('/api/register/') || url.pathname.startsWith('/api/device-link/') || nativePairing || oauthPost)) {
       ({ success } = await env.AUTH_RATE_LIMITER.limit({ key }));
     }
     const response = success ? await (mcp ? mcpRequest(request, env) : env.GYM.get(env.GYM.idFromName('personal')).fetch(request))
